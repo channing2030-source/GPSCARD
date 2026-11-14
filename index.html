@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>GPS 行動打卡系統</title>
+  
+  <!-- iPhone PWA 專屬設定：加入主畫面後全螢幕顯示 -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="員工打卡">
+  <!-- App 桌面圖示 (可替換成你自己的圖片網址) -->
+  <link rel="apple-touch-icon" href="https://flaticon.com">
+
+  <script src="https://tailwindcss.com"></script>
+</head>
+<body class="bg-slate-100 min-h-screen flex flex-col items-center justify-center p-4 select-none">
+
+  <div class="bg-white w-full max-w-md rounded-2xl shadow-lg p-6 space-y-6">
+    <!-- 標題與時間 -->
+    <div class="text-center border-b pb-4">
+      <h1 class="text-2xl font-bold text-slate-800">📍 行動 GPS 打卡</h1>
+      <p id="clock" class="text-slate-500 text-lg mt-1 font-mono">--:--:--</p>
+    </div>
+
+    <!-- 員工姓名輸入 (會自動記憶在手機裡) -->
+    <div>
+      <label class="block text-sm font-medium text-slate-700 mb-1">員工姓名 / 編號</label>
+      <input type="text" id="empName" placeholder="請輸入姓名" 
+        class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none text-base">
+    </div>
+
+    <!-- 定位狀態顯示區 -->
+    <div class="bg-slate-50 p-4 rounded-xl border border-slate-200 text-sm space-y-1">
+      <div class="flex justify-between">
+        <span class="text-slate-500">定位狀態：</span>
+        <span id="gpsStatus" class="font-semibold text-amber-600">等待定位...</span>
+      </div>
+      <div class="flex justify-between">
+        <span class="text-slate-500">距離公司：</span>
+        <span id="distanceText" class="font-semibold text-slate-700">-- 公尺</span>
+      </div>
+      <div class="text-xs text-slate-400 pt-1" id="coordsText">座標：尚未取得</div>
+    </div>
+
+    <!-- 打卡按鈕 -->
+    <div class="grid grid-cols-2 gap-4">
+      <button onclick="handleCheckIn('上班')" id="btnIn"
+        class="bg-blue-600 active:bg-blue-700 text-white font-bold py-4 rounded-xl shadow transition disabled:opacity-50">
+        ☀️ 上班打卡
+      </button>
+      <button onclick="handleCheckIn('下班')" id="btnOut"
+        class="bg-emerald-600 active:bg-emerald-700 text-white font-bold py-4 rounded-xl shadow transition disabled:opacity-50">
+        🌙 下班打卡
+      </button>
+    </div>
+
+    <!-- 提示訊息 -->
+    <div id="msgBox" class="hidden p-3 rounded-xl text-center text-sm font-medium"></div>
+  </div>
+
+  <script>
+    // ================= 系統設定區 (請務必修改這裡) =================
+    const CONFIG = {
+      // 1. 貼上你的 Google Apps Script 網頁應用程式網址
+      SCRIPT_URL: "請貼上你的_GOOGLE_APPS_SCRIPT_網址",
+      
+      // 2. 設定公司目標座標 (可在 Google Maps 上按右鍵複製經緯度)
+      OFFICE_LAT: 22.2760,   // 範例：香港中環緯度
+      OFFICE_LNG: 114.1903,  // 範例：香港中環經度
+      
+      // 3. 允許打卡的最大半徑 (單位：公尺)
+      MAX_DISTANCE: 100 
+    };
+    // ===============================================================
+
+    // 初始化時鐘與自動帶入上次輸入的姓名
+    setInterval(() => {
+      document.getElementById('clock').innerText = new Date().toLocaleTimeString('zh-HK', { hour12: false });
+    }, 1000);
+
+    const savedName = localStorage.getItem('empName');
+    if (savedName) document.getElementById('empName').value = savedName;
+
+    // Haversine 公式：計算兩組經緯度之間的直線距離 (公尺)
+    function calculateDistance(lat1, lon1, lat2, lon2) {
+      const R = 6371e3; // 地球半徑 (公尺)
+      const φ1 = lat1 * Math.PI / 180;
+      const φ2 = lat2 * Math.PI / 180;
+      const Δφ = (lat2 - lat1) * Math.PI / 180;
+      const Δλ = (lon2 - lon1) * Math.PI / 180;
+
+      const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+                Math.cos(φ1) * Math.cos(φ2) *
+                Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return Math.round(R * c);
+    }
+
+    // 顯示提示訊息
+    function showMessage(text, isSuccess) {
+      const box = document.getElementById('msgBox');
+      box.innerText = text;
+      box.className = `p-3 rounded-xl text-center text-sm font-medium ${
+        isSuccess ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+      }`;
+      box.classList.remove('hidden');
+    }
+
+    // 執行打卡主流程
+    function handleCheckIn(type) {
+      const name = document.getElementById('empName').value.trim();
+      if (!name) {
+        showMessage("❌ 請先輸入員工姓名！", false);
+        return;
+      }
+      localStorage.setItem('empName', name);
+
+      if (!navigator.geolocation) {
+        showMessage("❌ 您的瀏覽器不支援 GPS 定位", false);
+        return;
+      }
+
+      // 鎖定按鈕防止重複點擊
+      setButtonsDisabled(true);
+      document.getElementById('gpsStatus').innerText = "正在精準定位中...";
+      document.getElementById('gpsStatus').className = "font-semibold text-blue-600";
+
+      // 呼叫 iPhone 高精準度 GPS
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          const lat = position.coords.latitude;
+          const lng = position.coords.longitude;
+          const distance = calculateDistance(lat, lng, CONFIG.OFFICE_LAT, CONFIG.OFFICE_LNG);
+          const isWithinRange = distance <= CONFIG.MAX_DISTANCE;
+
+          // 更新畫面數據
+          document.getElementById('coordsText').innerText = `座標：${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+          document.getElementById('distanceText').innerText = `${distance} 公尺`;
+
+          if (!isWithinRange) {
+            document.getElementById('gpsStatus').innerText = "超出打卡範圍";
+            document.getElementById('gpsStatus').className = "font-semibold text-red-600";
+            showMessage(`❌ 打卡失敗！距離公司 ${distance} 公尺（限制 ${CONFIG.MAX_DISTANCE} 公尺內）`, false);
+            setButtonsDisabled(false);
+            return;
+          }
+
+          document.getElementById('gpsStatus').innerText = "位置驗證通過";
+          document.getElementById('gpsStatus').className = "font-semibold text-green-600";
+
+          // 傳送資料至 Google Sheets
+          sendToGoogleSheets({
+            name: name,
+            type: type,
+            lat: lat,
+            lng: lng,
+            distance: distance,
+            status: "正常"
+          });
+        },
+        (error) => {
+          setButtonsDisabled(false);
+          document.getElementById('gpsStatus').innerText = "定位失敗";
+          document.getElementById('gpsStatus').className = "font-semibold text-red-600";
+          
+          let errMsg = "無法取得位置，請確認手機已開啟定位權限。";
+          if (error.code === 1) errMsg = "您拒絕了定位權限，請至 iPhone 設定 > Safari 開啟位置存取。";
+          if (error.code === 3) errMsg = "GPS 定位逾時，請移至窗邊或訊號較佳處重試。";
+          showMessage(`❌ ${errMsg}`, false);
+        },
+        {
+          enableHighAccuracy: true, // 強制使用 GPS 晶片進行高精準度定位
+          timeout: 10000,           // 最多等待 10 秒
+          maximumAge: 0             // 不使用快取的舊位置
+        }
+      );
+    }
+
+    function sendToGoogleSheets(payload) {
+      showMessage("⏳ 正在上傳打卡紀錄...", true);
+
+      fetch(CONFIG.SCRIPT_URL, {
+        method: "POST",
+        mode: "no-cors", // 避免 Google Apps Script 跨網域 CORS 阻擋
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      })
+      .then(() => {
+        showMessage(`✅ ${payload.name}，${payload.type}打卡成功！`, true);
+        setButtonsDisabled(false);
+      })
+      .catch((err) => {
+        showMessage("❌ 網路連線異常，紀錄上傳失敗，請重試。", false);
+        setButtonsDisabled(false);
+      });
+    }
+
+    function setButtonsDisabled(disabled) {
+      document.getElementById('btnIn').disabled = disabled;
+      document.getElementById('btnOut').disabled = disabled;
+    }
+  </script>
+</body>
+</html>
